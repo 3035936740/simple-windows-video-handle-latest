@@ -107,7 +107,13 @@ FFmpeg 和显卡驱动必须兼容：例如较新的 FFmpeg 可能要求更高 N
 
 文字写入 UTF-8 文件，以 `expansion=none` 交给 drawtext；字体复制到独立临时工作目录，避免中文路径、引号、冒号、百分号和多层滤镜转义问题。外部进程通过 `CreateProcessW` 和独立参数列表执行，不使用 cmd / shell 拼接。
 
-文字旋转暂未加入；图片 Logo 支持旋转。当前输出为 8-bit 4:2:0，不包含专用 HDR 色调映射或字幕烧录功能。
+文字位置另有 **底部平铺 / 全屏平铺**：底部平铺是一行横向重复水印，距离底边 24 像素；全屏平铺覆盖整个画布。边缘处超出画布的重复文字会裁切。
+
+平铺旋转角度范围 **-360～360°**，默认 -30°；平铺间距范围 **0～1000 像素**，默认 40。间距是旋转后的文字外接矩形之间的横向和纵向空隙。参数仅在启用文字水印且选择平铺模式时生效，其他位置会禁用这两个输入框。文字 Alpha 同时控制整个平铺层的透明度。
+
+每批任务用 FFmpeg 的 drawtext / rotate / tile 预生成一次透明水印层，后续视频只需 overlay 该层；不在 C++ 中绘制视频帧。单层最多 4096 个重复单元，过密时会提示增大字号或间距。图片 Logo 也支持旋转。
+
+整数参数提供范围受限的增减按钮；鼠标悬停数值输入框可查看范围。开始前仍检查所有生效参数，错误提示包含字段和允许范围，并切换到对应设置页。未启用的水印和非模糊模式的背景参数不参与校验。当前输出为 8-bit 4:2:0，不包含专用 HDR 色调映射或字幕烧录功能。
 
 ## 源码与编译
 
@@ -158,12 +164,14 @@ python tests/integration.py --cli bin/SimpleVideoHandleCLI.exe --gpu
 
 测试用 Python 仅生成输入并检查 C++ 程序输出；滤镜和编码仍由正式处理核心调用 FFmpeg。
 
-覆盖四个重点模糊背景尺寸案例、严格尺寸/SAR、独立前景参考对比、背景平滑程度、边角无补黑、原音频包哈希、音视频时间差、其他缩放模式、FPS、静音、中文字/Alpha/旋转、AAC 回退、错误文件继续批处理、递归/冲突、原文件安全替换、停止清理、无效参数和 H.265。
+覆盖四个重点模糊背景尺寸案例、严格尺寸/SAR、独立前景参考对比、背景平滑程度、边角无补黑、原音频包哈希、音视频时间差、其他缩放模式、FPS、静音、中文字/Alpha/旋转、AAC 回退、错误文件继续批处理、递归/冲突、原文件安全替换、停止清理、无效参数和 H.265；另覆盖底部/全屏文字平铺、旋转/间距的像素差异、Alpha、中文换行与特殊字符、批次复用以及生成平铺层时的取消。
 
 CLI 示例：
 
 ```powershell
 bin/SimpleVideoHandleCLI.exe --input "D:/视频" --output "D:/视频输出" --recursive --width 720 --height 1080 --mode blur --encoder auto --codec h264
+bin/SimpleVideoHandleCLI.exe --input "D:/视频.mp4" --output "D:/输出" --text "中文水印" --font "C:/Windows/Fonts/msyh.ttc" --text-position tile-full --text-tile-rotation -30 --text-tile-spacing 40
+# 底部平铺改为 --text-position tile-bottom
 bin/SimpleVideoHandleCLI.exe --detect
 bin/SimpleVideoHandleCLI.exe --help
 ```

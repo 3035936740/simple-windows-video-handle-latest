@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <memory>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -91,6 +93,69 @@ void AddEncoding(std::vector<std::wstring>& a,const Config& c,const std::wstring
     if(enc==L"libx265") add({L"-x265-params",L"pools=4:log-level=error"});
     if(c.codec==L"hevc") add({L"-tag:v",L"hvc1"});
 }
+
+bool TiledText(const Config& c) {
+    return c.textEnabled && (c.textPosition==Position::TileBottom || c.textPosition==Position::TileFull);
+}
+fs::path CreateTiledTextLayer(const Config& c,const Tools& tools,const fs::path& work,
+    std::atomic<bool>& stop,const Callbacks& cb) {
+    WriteUtf8(work/L"watermark.txt",c.text);
+    fs::copy_file(c.font,work/L"font.ttf");
+    const auto lineCount=static_cast<int>(std::count(c.text.begin(),c.text.end(),L'\n'))+1;
+    const int canvasWidth=4096,canvasHeight=std::min(4096,std::max(128,c.fontSize*(lineCount+2)*2));
+    // Render and measure a single transparent text asset with FFmpeg, once per batch.
+    // No video frames are inspected or painted in C++.
+    std::wstring graph=L"[0:v]drawtext=fontfile=font.ttf:textfile=watermark.txt:expansion=none:fontsize="+
+        std::to_wstring(c.fontSize)+L":fontcolor="+c.fontColor+
+        L":x=16:y=16,split[ink][alpha];[alpha]alphaextract,bbox=min_val=1[measure];[measure]nullsink;[ink]format=rgba[out]";
+    WriteUtf8(work/L"text-render.txt",graph);
+    auto invoke=[&](const std::vector<std::wstring>& args)->ProcessResult {
+        auto r=RunProcess(tools.ffmpeg,args,stop,work,{},60000);
+        if(r.cancelled || stop) throw std::runtime_error("Text watermark preparation cancelled");
+        if(r.code!=0) {Log(cb,Wide(r.output));throw std::runtime_error(Utf8(L"生成文字平铺水印失败，详情见 FFmpeg 日志。"));}
+        return r;
+    };
+    auto rendered=invoke({L"-hide_banner",L"-loglevel",L"info",L"-nostdin",L"-y",L"-f",L"lavfi",L"-i",
+        L"color=c=black@0.0:s="+std::to_wstring(canvasWidth)+L"x"+std::to_wstring(canvasHeight)+L":r=1,format=rgba",
+        L"-filter_complex_threads",L"1",L"-/filter_complex",L"text-render.txt",L"-map",L"[out]",
+        L"-frames:v",L"1",L"-c:v",L"png",L"-pix_fmt",L"rgba",L"-update",L"1",L"glyph.png"});
+    std::istringstream lines(rendered.output);std::string line,bbox;
+    while(std::getline(lines,line)) if(line.find("Parsed_bbox_")!=std::string::npos && line.find("x1:")!=std::string::npos) bbox=line;
+    auto metric=[&](const char* name) {
+        std::smatch match;std::regex pattern(std::string("\\b")+name+":([0-9]+)");
+        if(!std::regex_search(bbox,match,pattern)) throw std::runtime_error("Cannot measure watermark text bounds");
+        return std::stoi(match[1].str());
+    };
+    int x=metric("x1"),y=metric("y1"),w=metric("w"),h=metric("h");
+    if(w<=0 || h<=0 || w>canvasWidth || h>canvasHeight) throw std::runtime_error(Utf8(L"水印文字没有可见内容，请检查文本和字体。"));
+    if(x+w>=canvasWidth-1 || y+h>=canvasHeight-1) throw std::runtime_error(Utf8(L"水印文本过长，请缩短、换行或降低字号。"));
+    int left=std::max(0,x-2),top=std::max(0,y-2);
+    w=std::min(canvasWidth-left,x+w+2-left);h=std::min(canvasHeight-top,y+h+2-top);
+    double radians=c.textTileRotation*3.14159265358979323846/180;
+    int rotatedWidth=std::max(1,static_cast<int>(std::ceil(w*std::abs(std::cos(radians))+h*std::abs(std::sin(radians)))));
+    int rotatedHeight=std::max(1,static_cast<int>(std::ceil(w*std::abs(std::sin(radians))+h*std::abs(std::cos(radians)))));
+    int cellWidth=rotatedWidth+c.textTileSpacing,cellHeight=rotatedHeight+c.textTileSpacing;
+    int columns=(c.width+cellWidth-1)/cellWidth;
+    int rows=c.textPosition==Position::TileFull?(c.height+cellHeight-1)/cellHeight:1;
+    if(static_cast<long long>(columns)*rows>4096) throw std::runtime_error(Utf8(L"平铺数量过多，请增大字号或平铺间距（最多 4096 个）。"));
+    const auto angle=Number(c.textTileRotation)+L"*PI/180";
+    std::wstring cellFilter=L"crop="+std::to_wstring(w)+L":"+std::to_wstring(h)+L":"+std::to_wstring(left)+L":"+std::to_wstring(top)+
+        L",format=rgba,rotate="+angle+L":ow="+std::to_wstring(rotatedWidth)+L":oh="+std::to_wstring(rotatedHeight)+
+        L":c=none,pad="+std::to_wstring(cellWidth)+L":"+std::to_wstring(cellHeight)+L":"+
+        std::to_wstring(c.textTileSpacing/2)+L":"+std::to_wstring(c.textTileSpacing/2)+L":color=black@0,format=rgba";
+    invoke({L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-y",L"-i",L"glyph.png",L"-vf",cellFilter,
+        L"-frames:v",L"1",L"-c:v",L"png",L"-pix_fmt",L"rgba",L"-update",L"1",L"cell.png"});
+    int bottomMargin=std::min(24,c.height-1);
+    int layerHeight=c.textPosition==Position::TileFull?c.height:std::min(cellHeight,c.height-bottomMargin);
+    std::wstring tileFilter=L"tile=layout="+std::to_wstring(columns)+L"x"+std::to_wstring(rows)+
+        L":nb_frames="+std::to_wstring(columns*rows)+L":color=black@0,crop="+std::to_wstring(c.width)+L":"+
+        std::to_wstring(layerHeight)+L":0:0,format=rgba";
+    invoke({L"-hide_banner",L"-loglevel",L"error",L"-nostdin",L"-y",L"-loop",L"1",L"-i",L"cell.png",L"-vf",tileFilter,
+        L"-frames:v",L"1",L"-c:v",L"png",L"-pix_fmt",L"rgba",L"-update",L"1",L"text-layer.png"});
+    Log(cb,L"已生成文字平铺层："+std::to_wstring(columns)+L" 列 × "+std::to_wstring(rows)+L" 行，角度 "+Number(c.textTileRotation)+L"°，间距 "+std::to_wstring(c.textTileSpacing)+L" 像素（本批次复用）。");
+    return work/L"text-layer.png";
+}
+
 std::vector<fs::path> Scan(const Config& c,std::atomic<bool>& stop) {
     if(fs::is_regular_file(c.input)) return {fs::absolute(c.input)};
     std::vector<fs::path> files;bool excludeOutput=PathKey(c.input)!=PathKey(c.output) && Within(c.output,c.input);
@@ -223,24 +288,46 @@ std::vector<std::wstring> DetectEncoders(const Tools& t,std::atomic<bool>& stop,
     return available;
 }
 void Validate(const Config& c) {
-    auto range=[](double v,double lo,double hi){return std::isfinite(v) && v>=lo && v<=hi;};
+    auto check=[](const wchar_t* field,double value,double lo,double hi) {
+        if(!std::isfinite(value) || value<lo || value>hi)
+            throw std::runtime_error(Utf8(std::wstring(field)+L"：当前值 "+Number(value)+L"，允许范围 "+Number(lo)+L"～"+Number(hi)+L"。"));
+    };
     if(c.input.empty() || (!fs::is_regular_file(c.input) && !fs::is_directory(c.input))) throw std::runtime_error("Input file/folder does not exist");
     if(fs::is_regular_file(c.input) && !Video(c.input)) throw std::runtime_error("Unsupported video extension");
     if(c.output.empty()) throw std::runtime_error("Output folder is required");
-    if(c.width<2 || c.height<2 || c.width>8192 || c.height>8192 || c.width%2 || c.height%2) throw std::runtime_error("Width/height must be even integers in 2..8192 (H.264/H.265 4:2:0)");
+    check(L"【基础设置】输出宽度",c.width,2,8192);check(L"【基础设置】输出高度",c.height,2,8192);
+    if(c.width%2 || c.height%2) throw std::runtime_error(Utf8(L"【基础设置】输出宽高必须为偶数（H.264 / H.265 4:2:0）。"));
     if(c.codec!=L"h264" && c.codec!=L"hevc") throw std::runtime_error("Unsupported codec");
     if(c.encoder!=L"auto" && c.encoder!=L"nvenc" && c.encoder!=L"qsv" && c.encoder!=L"amf" && c.encoder!=L"cpu") throw std::runtime_error("Unsupported encoder family");
     if(static_cast<int>(c.mode)<0 || static_cast<int>(c.mode)>3) throw std::runtime_error("Unsupported sizing mode");
-    if(!range(c.quality,0,51)||!range(c.bitrate,0,1000000)||!range(c.fps,0,240)||!range(c.blur,0.1,100)||!range(c.backgroundZoom,1,3)||
-       !range(c.brightness,-1,1)||!range(c.contrast,0,3)||!range(c.saturation,0,3)||!range(c.noise,0,20)||
-       !range(c.imageScale,1,200)||!range(c.imageAlpha,0,1)||!range(c.textAlpha,0,1)||!range(c.imageRotation,-360,360)||!range(c.fontSize,8,300))
-        throw std::runtime_error("One or more numeric parameters are out of range");
-    if(c.imageEnabled && (!fs::is_regular_file(c.image) || (Lower(c.image.extension().wstring())!=L".png" && Lower(c.image.extension().wstring())!=L".jpg" && Lower(c.image.extension().wstring())!=L".jpeg")))
-        throw std::runtime_error("Logo must be an existing PNG/JPG image");
-    if(c.textEnabled && (c.text.empty() || !fs::is_regular_file(c.font))) throw std::runtime_error("Watermark text and an existing font file are required");
-    bool color=Has({L"white",L"black",L"red",L"green",L"blue",L"yellow"},Lower(c.fontColor));
-    if(c.fontColor.size()==7 && c.fontColor.front()==L'#') color=std::all_of(c.fontColor.begin()+1,c.fontColor.end(),[](wchar_t v){return iswxdigit(v)!=0;});
-    if(!color) throw std::runtime_error("Font color must be white/black/red/green/blue/yellow or #RRGGBB");
+    check(L"【基础设置】码率 kbps",c.bitrate,0,1000000);
+    if(c.bitrate==0) check(L"【基础设置】质量 CQ / CRF",c.quality,0,51);
+    check(L"【基础设置】FPS",c.fps,0,240);
+    if(c.mode==Mode::Blur) {
+        check(L"【模糊背景】高斯模糊强度",c.blur,0.1,100);
+        check(L"【模糊背景】背景放大倍率",c.backgroundZoom,1,3);
+    }
+    check(L"【画面处理】亮度",c.brightness,-1,1);check(L"【画面处理】对比度",c.contrast,0,3);
+    check(L"【画面处理】饱和度",c.saturation,0,3);check(L"【画面处理】噪点强度",c.noise,0,20);
+    if(c.imageEnabled) {
+        check(L"【水印】图片宽度 %",c.imageScale,1,200);check(L"【水印】图片 Alpha",c.imageAlpha,0,1);
+        check(L"【水印】图片旋转角度",c.imageRotation,-360,360);
+        if(static_cast<int>(c.imagePosition)<0 || static_cast<int>(c.imagePosition)>static_cast<int>(Position::Custom)) throw std::runtime_error("Unsupported image position");
+        if(!fs::is_regular_file(c.image) || (Lower(c.image.extension().wstring())!=L".png" && Lower(c.image.extension().wstring())!=L".jpg" && Lower(c.image.extension().wstring())!=L".jpeg"))
+            throw std::runtime_error("Logo must be an existing PNG/JPG image");
+    }
+    if(c.textEnabled) {
+        check(L"【水印】文字 Alpha",c.textAlpha,0,1);check(L"【水印】字号",c.fontSize,8,300);
+        if(static_cast<int>(c.textPosition)<0 || static_cast<int>(c.textPosition)>static_cast<int>(Position::TileFull)) throw std::runtime_error("Unsupported text position");
+        if(TiledText(c)) {
+            check(L"【水印】平铺旋转角度",c.textTileRotation,-360,360);
+            check(L"【水印】平铺间距（像素）",c.textTileSpacing,0,1000);
+        }
+        if(c.text.empty() || !fs::is_regular_file(c.font)) throw std::runtime_error("Watermark text and an existing font file are required");
+        bool color=Has({L"white",L"black",L"red",L"green",L"blue",L"yellow"},Lower(c.fontColor));
+        if(c.fontColor.size()==7 && c.fontColor.front()==L'#') color=std::all_of(c.fontColor.begin()+1,c.fontColor.end(),[](wchar_t v){return iswxdigit(v)!=0;});
+        if(!color) throw std::runtime_error("Font color must be white/black/red/green/blue/yellow or #RRGGBB");
+    }
     if(c.encoder!=L"auto") {std::vector<std::wstring> dummy;AddEncoding(dummy,c,EncoderName(c,c.encoder));}
 }
 std::wstring BuildFilter(const Config& c) {
@@ -271,7 +358,13 @@ std::wstring BuildFilter(const Config& c) {
         auto xy=Coordinates(c.imagePosition,true,c.imageX,c.imageY);
         f<<L"[logo];"<<last<<L"[logo]overlay=x="<<xy.first<<L":y="<<xy.second<<L":eof_action=repeat:repeatlast=1:shortest=0[withlogo]";last=L"[withlogo]";
     }
-    if(c.textEnabled) {
+    if(TiledText(c)) {
+        int input=c.imageEnabled?2:1;
+        auto y=c.textPosition==Position::TileBottom?L"H-h-"+std::to_wstring(std::min(24,c.height-1)):L"0";
+        f<<L";["<<input<<L":v:0]format=rgba,colorchannelmixer=aa="<<Number(c.textAlpha)<<L"[texttiles];"
+         <<last<<L"[texttiles]overlay=x=0:y="<<y<<L":eof_action=repeat:repeatlast=1:shortest=0[withtiles]";
+        last=L"[withtiles]";
+    } else if(c.textEnabled) {
         auto xy=Coordinates(c.textPosition,false,c.textX,c.textY);
         unary(L"drawtext=fontfile=font.ttf:textfile=watermark.txt:expansion=none:fontsize="+std::to_wstring(c.fontSize)+
             L":fontcolor="+c.fontColor+L":alpha="+Number(c.textAlpha)+L":x="+xy.first+L":y="+xy.second);
@@ -289,6 +382,13 @@ Summary RunBatch(const Config& c,const Tools& tools,const std::vector<std::wstri
             for(const auto& family:{L"nvenc",L"qsv",L"amf",L"cpu"}) {auto name=EncoderName(c,family);if(Has(available,name)) candidates.push_back(name);}
         } else {auto name=EncoderName(c,c.encoder);if(Has(available,name)) candidates.push_back(name);}
         if(candidates.empty() && !stop) throw std::runtime_error("No usable encoder for selected codec/backend");
+        std::unique_ptr<TempDirectory> textAssets;
+        fs::path textLayer;
+        if(TiledText(c) && !stop) {
+            Log(cb,L"正在生成文字平铺水印层…");
+            textAssets=std::make_unique<TempDirectory>();
+            textLayer=CreateTiledTextLayer(c,tools,textAssets->path,stop,cb);
+        }
         std::set<std::wstring> outputs,inputs;for(const auto& p:files) inputs.insert(PathKey(p));
         for(size_t i=0;i<files.size() && !stop;++i) {
             double fraction=0;auto progress=[&](const std::wstring& status){if(cb.progress) cb.progress(i,fraction,summary.success,summary.failed,status);};
@@ -302,7 +402,7 @@ Summary RunBatch(const Config& c,const Tools& tools,const std::vector<std::wstri
                     output=base.parent_path()/(base.stem().wstring()+L"_handled_"+std::to_wstring(++suffix)+L".mp4");
                 outputs.insert(PathKey(output));fs::create_directories(output.parent_path());TempDirectory work;
                 stage=output.parent_path()/(L".svh_"+work.path.filename().wstring()+L".mp4");WriteUtf8(work.path/L"filter.txt",BuildFilter(c));
-                if(c.textEnabled) {WriteUtf8(work.path/L"watermark.txt",c.text);fs::copy_file(c.font,work.path/L"font.ttf");}
+                if(c.textEnabled && !TiledText(c)) {WriteUtf8(work.path/L"watermark.txt",c.text);fs::copy_file(c.font,work.path/L"font.ttf");}
                 double duration=Duration(tools,files[i],stop);
                 Log(cb,L"["+std::to_wstring(i+1)+L"/"+std::to_wstring(files.size())+L"] "+files[i].wstring());bool done=false;
                 for(const auto& enc:candidates) {
@@ -312,6 +412,7 @@ Summary RunBatch(const Config& c,const Tools& tools,const std::vector<std::wstri
                         Log(cb,L"编码器 "+enc+L"；音频 "+(c.audio?(copy?L"复制":L"AAC"):L"关闭"));
                         std::vector<std::wstring> a={L"-hide_banner",L"-loglevel",L"warning",L"-nostdin",L"-nostats",L"-y",L"-progress",L"pipe:1",L"-stats_period",L"0.2",L"-i",files[i].wstring()};
                         if(c.imageEnabled) {a.push_back(L"-i");a.push_back(fs::absolute(c.image).wstring());}
+                        if(!textLayer.empty()) {a.push_back(L"-i");a.push_back(textLayer.wstring());}
                         a.insert(a.end(),{L"-filter_complex_threads",L"2",L"-/filter_complex",L"filter.txt",L"-map",L"[vout]"});AddEncoding(a,c,enc);
                         if(c.audio) {a.insert(a.end(),{L"-map",L"0:a?",L"-c:a",copy?L"copy":L"aac"});if(!copy) a.insert(a.end(),{L"-b:a",L"192k"});}
                         else a.push_back(L"-an");

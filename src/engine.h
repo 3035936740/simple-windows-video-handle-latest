@@ -11,7 +11,7 @@
 namespace svh {
 namespace fs = std::filesystem;
 enum class Mode { Stretch, Black, Blur, Crop };
-enum class Position { TopLeft, TopRight, BottomLeft, BottomRight, Center, Custom };
+enum class Position { TopLeft, TopRight, BottomLeft, BottomRight, Center, Custom, TileBottom, TileFull };
 struct Config {
     fs::path input, output, image, font;
     int width=720, height=1080, quality=22, bitrate=0, noise=0, fontSize=36;
@@ -21,6 +21,8 @@ struct Config {
     double imageScale=20, imageAlpha=0.65, imageRotation=0, textAlpha=0.65;
     Position imagePosition=Position::BottomRight, textPosition=Position::BottomRight;
     int imageX=24, imageY=24, textX=24, textY=24;
+    double textTileRotation=-30;
+    int textTileSpacing=40;
     bool recursive=false, audio=true, overwrite=false, stripMetadata=true;
     bool mirror=false, flip=false, imageEnabled=false, textEnabled=false;
 };

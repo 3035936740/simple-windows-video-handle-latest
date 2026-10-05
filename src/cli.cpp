@@ -58,13 +58,15 @@ int wmain(int argc,wchar_t** argv) {
             else if(key==L"--font-size") c.fontSize=integer();
             else if(key==L"--font-color") c.fontColor=value();
             else if(key==L"--text-alpha") c.textAlpha=number();
+            else if(key==L"--text-tile-rotation") c.textTileRotation=number();
+            else if(key==L"--text-tile-spacing") c.textTileSpacing=integer();
             else if(key==L"--text-x") c.textX=integer();
             else if(key==L"--text-y") c.textY=integer();
             else if(key==L"--cancel-after-ms") cancelMs=integer();
             else if(key==L"--mode") {
                 auto v=value();if(v==L"stretch") c.mode=Mode::Stretch;else if(v==L"black") c.mode=Mode::Black;else if(v==L"blur") c.mode=Mode::Blur;else if(v==L"crop") c.mode=Mode::Crop;else throw std::runtime_error("Unknown mode");
             } else if(key==L"--image-position" || key==L"--text-position") {
-                auto v=value();const std::map<std::wstring,Position> positions={{L"tl",Position::TopLeft},{L"tr",Position::TopRight},{L"bl",Position::BottomLeft},{L"br",Position::BottomRight},{L"center",Position::Center},{L"custom",Position::Custom}};
+                auto v=value();const std::map<std::wstring,Position> positions={{L"tl",Position::TopLeft},{L"tr",Position::TopRight},{L"bl",Position::BottomLeft},{L"br",Position::BottomRight},{L"center",Position::Center},{L"custom",Position::Custom},{L"tile-bottom",Position::TileBottom},{L"tile-full",Position::TileFull}};
                 if(!positions.count(v)) throw std::runtime_error("Unknown position");if(key==L"--image-position") c.imagePosition=positions.at(v);else c.textPosition=positions.at(v);
             } else if(key==L"--help") {
                 std::cout<<"SimpleVideoHandleCLI --input FILE_OR_FOLDER --output FOLDER [--width 720 --height 1080]\n"
@@ -72,6 +74,7 @@ int wmain(int argc,wchar_t** argv) {
                     "--quality 22 --bitrate 0 --preset auto --fps 0 --recursive --overwrite --no-audio\n"
                     "--image PNG --image-scale 20 --image-alpha .65 --image-rotate 0 --image-position tl|tr|bl|br|center|custom\n"
                     "--text TEXT --font FONT --font-size 36 --font-color white --text-alpha .65 --text-position center\n"
+                    "--text-position tl|tr|bl|br|center|custom|tile-bottom|tile-full --text-tile-rotation -30 --text-tile-spacing 40\n"
                     "--mirror --flip --brightness 0 --contrast 1 --saturation 1 --noise 0 --blur 24 --zoom 1\n"
                     "--detect (real encoding probe) | --filter (print filter graph)\n";return 0;
             } else throw std::runtime_error("Unknown option: "+Utf8(key));

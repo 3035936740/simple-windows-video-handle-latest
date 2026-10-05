@@ -24,13 +24,14 @@ Tools tools;
 std::vector<std::wstring> encoders;
 bool busy=false, detecting=false;
 size_t totalFiles=0;
+std::vector<std::pair<int,HWND>> numericSpinners;
 constexpr UINT WM_EVENT=WM_APP+1;
 enum Id {
     Input=100,InputFile,InputFolder,Output,OutputFolder,OpenOutput,Width,Height,Sizing,Codec,Encoder,
     Quality,Bitrate,Preset,Fps,Audio,Overwrite,Metadata,Recursive,Detect,
     Mirror,Flip,Brightness,Contrast,Saturation,Noise,BlurSigma,BackgroundZoom,
     ImageEnable,ImagePath,ImageBrowse,ImageScale,ImageAlpha,ImageRotate,ImagePos,ImageX,ImageY,
-    TextEnable,TextValue,FontPath,FontBrowse,FontSize,FontColor,TextAlpha,TextPos,TextX,TextY,
+    TextEnable,TextValue,FontPath,FontBrowse,FontSize,FontColor,TextAlpha,TextPos,TextX,TextY,TextTileRotate,TextTileGap,
     Start,Stop,SaveLog
 };
 struct Event {
@@ -83,28 +84,53 @@ std::wstring Text(Id id) {
 void Set(Id id,const std::wstring& s){SetWindowTextW(GetDlgItem(window,id),s.c_str());}
 bool Checked(Id id){return SendMessageW(GetDlgItem(window,id),BM_GETCHECK,0,0)==BST_CHECKED;}
 int Selection(Id id){return static_cast<int>(SendMessageW(GetDlgItem(window,id),CB_GETCURSEL,0,0));}
+std::wstring FieldName(Id id) {
+    switch(id) {
+        case Width:return L"【基础设置】输出宽度";case Height:return L"【基础设置】输出高度";
+        case Quality:return L"【基础设置】质量 CQ / CRF";case Bitrate:return L"【基础设置】码率";case Fps:return L"【基础设置】FPS";
+        case Brightness:return L"【画面处理】亮度";case Contrast:return L"【画面处理】对比度";case Saturation:return L"【画面处理】饱和度";case Noise:return L"【画面处理】噪点";
+        case BlurSigma:return L"【模糊背景】高斯模糊强度";case BackgroundZoom:return L"【模糊背景】背景放大倍率";
+        case ImageScale:return L"【水印】图片宽度 %";case ImageAlpha:return L"【水印】图片 Alpha";case ImageRotate:return L"【水印】图片旋转";
+        case ImageX:return L"【水印】图片 X";case ImageY:return L"【水印】图片 Y";
+        case FontSize:return L"【水印】字号";case TextAlpha:return L"【水印】文字 Alpha";case TextX:return L"【水印】文字 X";case TextY:return L"【水印】文字 Y";
+        case TextTileRotate:return L"【水印】平铺旋转角度";case TextTileGap:return L"【水印】平铺间距";
+        default:return L"参数";
+    }
+}
 double Numeric(Id id) {
     auto s=Text(id);size_t n=0;double value;
-    try {value=std::stod(s,&n);}catch(...) {throw std::runtime_error("数字参数无效，请检查输入框。");}
-    if(n!=s.size()) throw std::runtime_error("数字参数包含多余字符。");return value;
+    try {value=std::stod(s,&n);}catch(...) {throw std::runtime_error(Utf8(FieldName(id)+L"：请输入有效数字，当前内容为“"+s+L"”。"));}
+    if(n!=s.size() || !std::isfinite(value)) throw std::runtime_error(Utf8(FieldName(id)+L"：请输入有限数值，当前内容为“"+s+L"”。"));return value;
 }
 int Integer(Id id) {
     double value=Numeric(id);
-    if(!std::isfinite(value) || value<-1000000 || value>1000000 || value!=static_cast<int>(value)) throw std::runtime_error("此参数需要输入整数。");
+    if(value<-1000000 || value>1000000 || value!=static_cast<int>(value)) throw std::runtime_error(Utf8(FieldName(id)+L"：需要输入整数。"));
     return static_cast<int>(value);
 }
 Config ReadConfig() {
     Config c;c.input=Text(Input);c.output=Text(Output);c.width=Integer(Width);c.height=Integer(Height);
     c.mode=static_cast<Mode>(Selection(Sizing));c.codec=Selection(Codec)==0?L"h264":L"hevc";
     static const std::vector<std::wstring> families={L"auto",L"nvenc",L"qsv",L"amf",L"cpu"};c.encoder=families.at(Selection(Encoder));
-    c.quality=Integer(Quality);c.bitrate=Integer(Bitrate);c.preset=Text(Preset);c.fps=Numeric(Fps);
+    c.bitrate=Integer(Bitrate);if(c.bitrate==0) c.quality=Integer(Quality);c.preset=Text(Preset);c.fps=Numeric(Fps);
     c.audio=Checked(Audio);c.overwrite=Checked(Overwrite);c.stripMetadata=Checked(Metadata);c.recursive=Checked(Recursive);
     c.mirror=Checked(Mirror);c.flip=Checked(Flip);c.brightness=Numeric(Brightness);c.contrast=Numeric(Contrast);c.saturation=Numeric(Saturation);c.noise=Integer(Noise);
-    c.blur=Numeric(BlurSigma);c.backgroundZoom=Numeric(BackgroundZoom);
-    c.imageEnabled=Checked(ImageEnable);c.image=Text(ImagePath);c.imageScale=Numeric(ImageScale);c.imageAlpha=Numeric(ImageAlpha);c.imageRotation=Numeric(ImageRotate);
-    c.imagePosition=static_cast<Position>(Selection(ImagePos));c.imageX=Integer(ImageX);c.imageY=Integer(ImageY);
-    c.textEnabled=Checked(TextEnable);c.text=Text(TextValue);c.font=Text(FontPath);c.fontSize=Integer(FontSize);c.fontColor=Text(FontColor);c.textAlpha=Numeric(TextAlpha);
-    c.textPosition=static_cast<Position>(Selection(TextPos));c.textX=Integer(TextX);c.textY=Integer(TextY);Validate(c);return c;
+    if(c.mode==Mode::Blur) {c.blur=Numeric(BlurSigma);c.backgroundZoom=Numeric(BackgroundZoom);}
+    c.imageEnabled=Checked(ImageEnable);
+    if(c.imageEnabled) {
+        c.image=Text(ImagePath);c.imageScale=Numeric(ImageScale);c.imageAlpha=Numeric(ImageAlpha);c.imageRotation=Numeric(ImageRotate);
+        c.imagePosition=static_cast<Position>(Selection(ImagePos));
+        if(c.imagePosition==Position::Custom) {c.imageX=Integer(ImageX);c.imageY=Integer(ImageY);}
+    }
+    c.textEnabled=Checked(TextEnable);
+    if(c.textEnabled) {
+        c.text=Text(TextValue);c.font=Text(FontPath);c.fontSize=Integer(FontSize);c.fontColor=Text(FontColor);c.textAlpha=Numeric(TextAlpha);
+        c.textPosition=static_cast<Position>(Selection(TextPos));
+        if(c.textPosition==Position::Custom) {c.textX=Integer(TextX);c.textY=Integer(TextY);}
+        if(c.textPosition==Position::TileBottom || c.textPosition==Position::TileFull) {
+            c.textTileRotation=Numeric(TextTileRotate);c.textTileSpacing=Integer(TextTileGap);
+        }
+    }
+    Validate(c);return c;
 }
 void SwitchPage() {
     int active=TabCtrl_GetCurSel(tabs);
@@ -115,9 +141,46 @@ void AppendLog(const std::wstring& s) {
     if(n>180000) {SendMessageW(logView,EM_SETSEL,0,60000);SendMessageW(logView,EM_REPLACESEL,FALSE,reinterpret_cast<LPARAM>(L""));n=GetWindowTextLengthW(logView);}
     auto line=s+L"\r\n";SendMessageW(logView,EM_SETSEL,n,n);SendMessageW(logView,EM_REPLACESEL,FALSE,reinterpret_cast<LPARAM>(line.c_str()));
 }
+void InitializeNumericControls() {
+    HWND tips=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
+        CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,nullptr,instance,nullptr);
+    SendMessageW(tips,TTM_SETMAXTIPWIDTH,0,Px(420));
+    const std::vector<std::pair<Id,const wchar_t*>> hints={
+        {Width,L"2～8192 的偶数"},{Height,L"2～8192 的偶数"},{Quality,L"0～51；码率为 0 时生效"},
+        {Bitrate,L"0～1000000 kbps；0 表示质量模式"},{Fps,L"0～240；0 保留原始帧时间线"},
+        {Brightness,L"-1～1"},{Contrast,L"0～3"},{Saturation,L"0～3"},{Noise,L"0～20 的整数"},
+        {BlurSigma,L"0.1～100；仅模糊背景模式生效"},{BackgroundZoom,L"1～3；仅模糊背景模式生效"},
+        {ImageScale,L"1～200；图片宽度占输出宽度的百分比"},{ImageAlpha,L"0～1"},{ImageRotate,L"-360～360 度"},
+        {FontSize,L"8～300 像素"},{TextAlpha,L"0～1"},{TextTileRotate,L"-360～360 度；仅平铺模式生效"},
+        {TextTileGap,L"0～1000 像素，整数；仅平铺模式生效"}
+    };
+    for(const auto& hint:hints) {
+        TOOLINFOW info{};info.cbSize=sizeof(info);info.uFlags=TTF_IDISHWND|TTF_SUBCLASS;info.hwnd=window;
+        info.uId=reinterpret_cast<UINT_PTR>(GetDlgItem(window,hint.first));info.lpszText=const_cast<LPWSTR>(hint.second);
+        SendMessageW(tips,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+    }
+    struct Spinner { Id id;int page,lo,hi; };
+    for(const auto& s:std::vector<Spinner>{{Width,0,2,8192},{Height,0,2,8192},{Quality,0,0,51},
+        {Bitrate,0,0,1000000},{Noise,1,0,20},{FontSize,3,8,300},{TextTileGap,3,0,1000}}) {
+        HWND edit=GetDlgItem(window,s.id);RECT r{};GetWindowRect(edit,&r);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);
+        HWND spin=Control(s.page,UPDOWN_CLASSW,L"",UDS_ALIGNRIGHT|UDS_SETBUDDYINT|UDS_ARROWKEYS|UDS_NOTHOUSANDS,
+            MulDiv(r.right-Px(18),96,dpi),MulDiv(r.top,96,dpi),18,25);
+        SendMessageW(spin,UDM_SETBUDDY,reinterpret_cast<WPARAM>(edit),0);
+        SendMessageW(spin,UDM_SETRANGE32,s.lo,s.hi);SendMessageW(spin,UDM_SETPOS32,0,std::stoi(Text(s.id)));
+        settings.push_back(spin);numericSpinners.emplace_back(s.id,spin);
+        SetWindowLongPtrW(edit,GWL_STYLE,GetWindowLongPtrW(edit,GWL_STYLE)|ES_NUMBER);
+    }
+}
+void UpdateTileControls() {
+    int position=Selection(TextPos);
+    bool enabled=!busy && Checked(TextEnable) && (position==static_cast<int>(Position::TileBottom) || position==static_cast<int>(Position::TileFull));
+    EnableWindow(GetDlgItem(window,TextTileRotate),enabled);
+    EnableWindow(GetDlgItem(window,TextTileGap),enabled);
+    for(const auto& spin:numericSpinners) if(spin.first==TextTileGap) EnableWindow(spin.second,enabled);
+}
 void SetBusy(bool value) {
     busy=value;for(HWND c:settings) EnableWindow(c,!value);
-    EnableWindow(GetDlgItem(window,Start),!value && !encoders.empty());EnableWindow(GetDlgItem(window,Stop),value);
+    EnableWindow(GetDlgItem(window,Start),!value && !encoders.empty());EnableWindow(GetDlgItem(window,Stop),value);UpdateTileControls();
 }
 std::wstring PickFile(const wchar_t* filter,bool save=false) {
     wchar_t name[32768]={};OPENFILENAMEW ofn{};ofn.lStructSize=sizeof(ofn);ofn.hwndOwner=window;ofn.lpstrFile=name;ofn.nMaxFile=32768;ofn.lpstrFilter=filter;
@@ -173,7 +236,7 @@ void CreateUi() {
     Label(0,L"preset",445,211,65);Edit(0,Preset,L"auto",515,207,130);Label(0,L"FPS（0 = 原始）",680,211,150);Edit(0,Fps,L"0",835,207,120);
     Check(0,Audio,L"保留音频（优先复制，失败转 AAC）",30,250,345,true);Check(0,Recursive,L"递归子目录",390,250,170);
     Check(0,Metadata,L"移除 metadata",575,250,180,true);Check(0,Overwrite,L"覆盖同名输出 / 原 MP4",755,250,220);
-    Label(0,L"宽高为 2～8192 的偶数；码率 0 使用质量模式。输出统一为 MP4。",30,294,920);
+    Label(0,L"宽高 2～8192 偶数；质量 0～51；码率 0～1000000（0 = 质量模式）；FPS 0～240。",30,294,920);
     Label(0,L"preset：auto 自动适配；NVENC p1～p7；CPU / QSV veryfast～veryslow；AMF speed / balanced / quality。",30,325,930);
     Label(0,L"关闭覆盖时自动添加编号；覆盖仅在编码完全成功后生效。",30,356,930);
     Check(1,Mirror,L"水平镜像",30,62,180);Check(1,Flip,L"垂直翻转",240,62,180);
@@ -197,10 +260,12 @@ void CreateUi() {
     Check(3,TextEnable,L"启用文字水印",30,135,230);Edit(3,TextValue,L"",270,131,690,62,ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL);
     Label(3,L"字体文件",30,214,100);wchar_t winDir[32768];GetWindowsDirectoryW(winDir,32768);Edit(3,FontPath,(fs::path(winDir)/L"Fonts"/L"msyh.ttc").wstring(),130,210,710);Button(3,FontBrowse,L"选择字体",850,209,110);
     Label(3,L"字号",30,256,55);Edit(3,FontSize,L"36",85,252,65);Label(3,L"颜色",165,256,55);Edit(3,FontColor,L"white",220,252,100);
-    Label(3,L"Alpha",340,256,60);Edit(3,TextAlpha,L"0.65",405,252,65);Combo(3,TextPos,positions,3,495,252,195);
+    Label(3,L"Alpha",340,256,60);Edit(3,TextAlpha,L"0.65",405,252,65);auto textPositions=positions;textPositions.push_back(L"底部平铺");textPositions.push_back(L"全屏平铺");Combo(3,TextPos,textPositions,3,495,252,195);
     Label(3,L"X",720,256,20);Edit(3,TextX,L"24",740,252,70);Label(3,L"Y",830,256,20);Edit(3,TextY,L"24",850,252,70);
-    Label(3,L"PNG 原始 Alpha 会保留；X/Y 仅在“自定义”生效。图片宽度 % 以输出宽度为基准。",30,303,925);
-    Label(3,L"文字支持中文和换行；字体需包含对应字符。颜色：white / black / red / green / blue / yellow / #RRGGBB。",30,343,925);
+    Label(3,L"平铺旋转角度（-360～360°）",30,299,260);Edit(3,TextTileRotate,L"-30",290,295,85);
+    Label(3,L"平铺间距（0～1000 像素）",400,299,255);Edit(3,TextTileGap,L"40",660,295,85);
+    Label(3,L"平铺参数仅在文字“底部平铺 / 全屏平铺”模式启用；非平铺模式忽略角度和间距。",30,337,925);
+    Label(3,L"PNG 保留原始 Alpha；文字支持中文 / 换行；颜色支持英文名称或 #RRGGBB。X/Y 仅在自定义模式生效。",30,369,925);
     Label(4,L"1. 在基础设置中选择一个视频或目录，配置输出目录、尺寸和编码。",30,62,925);
     Label(4,L"2. 点击下方【开始】，队列列出所有文件并显示各自状态。",30,114,925);
     Label(4,L"3. 失败的文件会记录 FFmpeg 日志，后续文件继续处理。",30,166,925);
@@ -217,13 +282,18 @@ void CreateUi() {
     SendMessageW(currentBar,PBM_SETRANGE32,0,1000);SendMessageW(totalBar,PBM_SETRANGE32,0,1000);
     Button(-1,Start,L"开始",20,608,130);Button(-1,Stop,L"停止",165,608,100);Button(-1,SaveLog,L"导出日志",285,608,130);
     logView=Control(-1,L"EDIT",L"",ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_TABSTOP,20,648,960,125);SendMessageW(logView,EM_SETLIMITTEXT,240000,0);
-    SwitchPage();DetectTools();
+    InitializeNumericControls();SwitchPage();DetectTools();
 }
 LRESULT CALLBACK WindowProcedure(HWND h,UINT message,WPARAM w,LPARAM l) {
     switch(message) {
         case WM_CREATE:
             window=h;try {CreateUi();}catch(const std::exception& e) {MessageBoxW(h,Wide(e.what()).c_str(),L"界面初始化失败",MB_ICONERROR);return -1;}return 0;
         case WM_NOTIFY:
+            if(reinterpret_cast<NMHDR*>(l)->code==UDN_DELTAPOS) {
+                auto delta=reinterpret_cast<NMUPDOWN*>(l);
+                for(const auto& spin:numericSpinners) if(spin.second==delta->hdr.hwndFrom && (spin.first==Width || spin.first==Height)) delta->iDelta*=2;
+                return 0;
+            }
             if(reinterpret_cast<NMHDR*>(l)->hwndFrom==tabs && reinterpret_cast<NMHDR*>(l)->code==TCN_SELCHANGE) SwitchPage();return 0;
         case WM_SIZE:if(queueView) LayoutBottom(LOWORD(l),HIWORD(l));return 0;
         case WM_COMMAND:
@@ -235,6 +305,7 @@ LRESULT CALLBACK WindowProcedure(HWND h,UINT message,WPARAM w,LPARAM l) {
                     case OpenOutput:{auto s=Text(Output);if(!s.empty()) ShellExecuteW(h,L"open",s.c_str(),nullptr,nullptr,SW_SHOWNORMAL);break;}
                     case ImageBrowse:{auto s=PickFile(L"图片\0*.png;*.jpg;*.jpeg\0");if(!s.empty()) Set(ImagePath,s);break;}
                     case FontBrowse:{auto s=PickFile(L"字体\0*.ttf;*.ttc;*.otf\0");if(!s.empty()) Set(FontPath,s);break;}
+                    case TextEnable:case TextPos:UpdateTileControls();break;
                     case Detect:if(!busy) DetectTools();break;
                     case Start:
                         if(!busy) {
@@ -254,7 +325,12 @@ LRESULT CALLBACK WindowProcedure(HWND h,UINT message,WPARAM w,LPARAM l) {
                         }break;
                     }
                 }
-            }catch(const std::exception& e){MessageBoxW(h,Wide(e.what()).c_str(),L"请检查参数",MB_OK|MB_ICONWARNING);}return 0;
+            }catch(const std::exception& e){
+                auto error=Wide(e.what());
+                const std::array<std::wstring,4> tabNames={L"【基础设置】",L"【画面处理】",L"【模糊背景】",L"【水印】"};
+                for(size_t i=0;i<tabNames.size();++i) if(error.find(tabNames[i])!=std::wstring::npos) {TabCtrl_SetCurSel(tabs,static_cast<int>(i));SwitchPage();break;}
+                MessageBoxW(h,error.c_str(),L"请检查参数",MB_OK|MB_ICONWARNING);
+            }return 0;
         case WM_EVENT:{
             std::unique_ptr<Event> e(reinterpret_cast<Event*>(l));
             if(e->kind==Event::Log) AppendLog(e->text);

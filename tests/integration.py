@@ -213,6 +213,9 @@ dst=a.work/'sar_output';process(sar,dst,'--width','720','--height','1080')
 assert probe(dst/sar.name)['streams'][0]['sample_aspect_ratio']=='1:1'
 report.append({'test':'Anamorphic SAR normalization','result':'PASS'})
 
+from text_tiles import check_tiles
+check_tiles(a.work, process, ff, probe, frame, hash_audio, report)
+
 if a.gpu:
     dst=a.work/'nvenc';dst.mkdir(exist_ok=True)
     r=run([a.cli,'--input',source,'--output',dst,'--encoder','nvenc','--overwrite'])
