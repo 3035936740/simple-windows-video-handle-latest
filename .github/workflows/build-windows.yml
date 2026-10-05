@@ -1,0 +1,74 @@
+name: Build Windows x64 Release
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure Visual Studio 2022 MSVC x64
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Release
+        run: |
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Core tests
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare FFmpeg and portable bin
+        run: |
+          $ffmpegDir = $null
+          foreach ($folder in @('deps', 'bin', '.')) {
+            if ((Test-Path "$folder/ffmpeg.exe") -and (Test-Path "$folder/ffprobe.exe")) {
+              $ffmpegDir = (Resolve-Path $folder).Path
+              break
+            }
+          }
+          if (-not $ffmpegDir) {
+            python scripts/acquire_ffmpeg.py --version 7.1 --dest deps/ffmpeg
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $ffmpegDir = (Get-ChildItem deps/ffmpeg -Filter ffmpeg.exe -Recurse | Select-Object -First 1).Directory.FullName
+          }
+          python scripts/package.py --build build --dest bin --ffmpeg-dir "$ffmpegDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path bin/SimpleVideoHandle.exe)) { throw 'SimpleVideoHandle.exe missing' }
+      - name: Video integration tests
+        run: |
+          python tests/integration.py --cli bin/SimpleVideoHandleCLI.exe --work test-output/integration
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/package.py --build build --dest bin --ffmpeg-dir bin --test-report test-output/integration/report.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleVideoHandle-Windows-x64
+          path: bin/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleVideoHandle-build-diagnostics
+          path: |
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/Testing/Temporary/LastTest.log
+            test-output/integration/report.json
+          if-no-files-found: ignore

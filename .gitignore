@@ -1,0 +1,6 @@
+bin
+build
+build-mingw
+build-msvc
+build-release
+test-output
