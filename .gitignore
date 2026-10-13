@@ -1,6 +1,9 @@
 bin
+build-text-tiles
 build
 build-mingw
 build-msvc
 build-release
 test-output
+__pycache__/
+*.zip
