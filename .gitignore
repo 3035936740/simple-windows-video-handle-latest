@@ -7,3 +7,4 @@ build-release
 test-output
 __pycache__/
 *.zip
+tools\ffmpeg-7.1\ffmpeg-7.1-essentials_build\doc
